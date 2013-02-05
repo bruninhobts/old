@@ -1,0 +1,13 @@
+; $Id: uc_pagseguro.info,v 1.4 2010/10/11 01:53:18 wundo Exp $
+name = "UOL PagSeguro"
+description = "Ativa processo de pagamento por PagSeguro"
+dependencies[] = uc_payment
+package = Ubercart - payment
+
+core = 6.x
+; Information added by drupal.org packaging script on 2010-11-05
+version = "6.x-1.0-rc2"
+core = "6.x"
+project = "uc_pagseguro"
+datestamp = "1288974045"
+

@@ -1,0 +1,28 @@
+Módulo Wp-e-commerce Versão 3.2.4
+
+Instalação do módulo PagSeguro para Wp-ecommerce
+
+=== Pré-requisitos ===
+
+- WordPress 3.1
+- Wp-e-commerce 3.8.x
+
+=== Instalação ===
+
+Visite: http://pagseguro.visie.com.br/plataforma/wordpress/wp-e-commerce/
+
+=== Change log ===
+01/06/2011
+- Passando mais informações do usuário para o pagseguro, agora pegando
+os dados do comprador direto da tabela e relacionando com os dados do post
+
+31/05/2011
+- Correção das informações que são enviadas para o pagseguro
+
+23/05/2011
+- Correção no cálculo de frete
+
+20/05/2011
+- Disponibilizado nova versão do PagSeguro wp-e-commerce 3.8.x
+
+

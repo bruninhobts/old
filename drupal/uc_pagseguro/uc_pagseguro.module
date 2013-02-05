@@ -1,0 +1,830 @@
+<?php
+// $Id: uc_pagseguro.module,v 1.41 2010/11/05 16:10:10 wundo Exp $
+
+
+/* *************************
+ * Hook Functions (Drupal)
+ * ************************* */
+
+/**
+ * Implementation of hook_help().
+ * @todo Improve Docs
+ */
+function uc_pagseguro_help($path, $arg) {
+  switch ($path) {
+    case 'admin/store/settings/pagseguro':
+
+    return '<p>'. t('Don\'t forget to set Return URL as <i>!returl_value</i> and generate the security token in your <a href="!returl_conf_link">PagSeguro Settings page</a>', 
+      array(
+        '!returl_conf_link' => 'https://pagseguro.uol.com.br/preferences/automaticReturn.jhtml',
+        '!returl_conf_link' => url('pagseguro', array('absolute' => TRUE))
+      )
+    ) .'</p>';
+  }
+}
+
+/**
+ * Implementation of hook_menu().
+ */
+function uc_pagseguro_menu() {
+  $items['cart/pagseguro/complete'] = array(
+    'title' => 'Pedido Completo',
+    'page callback' => 'uc_pagseguro_complete',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  
+  $items['cart/pagseguro/form'] = array(
+    'title' => 'PagSeguro Form',
+    'description' => 'Builds the form to send to Pag Seguro',
+    'page callback' => 'uc_pagseguro_form',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_theme().
+ */
+function uc_pagseguro_theme($existing, $type, $theme, $path) {
+  return array(
+    'uc_pagseguro_form_latin1' => array(
+      'arguments' => array('title' => NULL, 'form' => NULL),
+      'template' => 'form_latin1',
+    ),
+  );
+}
+ 
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function uc_pagseguro_form_alter(&$form, $form_state, $form_id) {
+
+  switch ( $form_id ) {
+    case 'uc_payment_methods_form':
+      if ( variable_get('uc_pagseguro_use_sandbox', 0) ) {
+        // @todo: translate to english and save translation
+        drupal_set_message(t('IMPORTANT: Using test address <strong>!url</strong> for PagSeguro payment', array('!url' => variable_get('uc_pagseguro_sandbox_url', ''))),'error');
+      }
+
+    break;
+
+    case 'uc_cart_checkout_review_form':
+      if (($order_id = intval($_SESSION['cart_order'])) > 0) {
+        $order = uc_order_load($order_id);
+
+        if ($order->payment_method == 'pagseguro') {
+          drupal_add_css(drupal_get_path('module', 'uc_pagseguro') . '/uc_pagseguro.css');
+
+          unset($form['submit']);
+          $form['#prefix'] = '<table id="review-pagseguro"><tr><td>';
+          $form['#suffix'] = '</td><td><iframe id="pagseguro-form" src="'. url('cart/pagseguro/form') .'" frameborder="0" width="150" height="40" scrolling="no"></iframe></td></tr></table>';
+        }
+      }
+    break;
+
+    // hook_form_alter to keep the delivery information aligned with what UOL needs.
+    case 'uc_cart_checkout_form':
+      drupal_add_css(drupal_get_path('module', 'uc_pagseguro') . '/uc_pagseguro.css');
+
+      $form['panes']['billing']['billing_street1']['#description'] = t('Formato: Rua XYZ, 9999 - Sem n&uacute;mero, use: S/N');
+      $form['panes']['billing']['billing_street1']['#validate'] = array('_uc_pagseguro_validate_address' => array());
+      $form['panes']['billing']['billing_street2']['#description'] = t('Formato: Ap. 12, Bairro - Ou somente o Bairro');
+      $form['panes']['billing']['billing_street2']['#validate'] = array('_uc_pagseguro_validate_district' => array());
+      $form['panes']['billing']['billing_postal_code']['#description'] = t('Formato: Somente N&uacute;meros');
+      $form['panes']['billing']['billing_postal_code']['#validate'] = array('_uc_pagseguro_validate_postal_code' => array());
+      $form['panes']['billing']['billing_postal_code']['#maxlength'] = '8';
+      $form['panes']['billing']['billing_phone']['#description'] = t('Formato: (99) 1234-5678');
+      $form['panes']['billing']['billing_phone']['#validate'] = array('_uc_pagseguro_validate_phone' => array());
+      $form['panes']['billing']['billing_phone']['#maxlength'] = '14';
+
+      $form['panes']['delivery']['delivery_street1']['#description'] = t('Formato: Rua XYZ, 9999  - Sem n&uacute;mero, use: S/N');
+      $form['panes']['delivery']['delivery_street1']['#validate'] = array('_uc_pagseguro_validate_address' => array());
+      $form['panes']['delivery']['delivery_street2']['#description'] = t('Formato: Ap. 12, Bairro - Ou somente o bairro');
+      $form['panes']['delivery']['delivery_street2']['#validate'] = array('_uc_pagseguro_validate_district' => array());
+      $form['panes']['delivery']['delivery_postal_code']['#description'] = t('Formato: Somente N&uacute;meros');
+      $form['panes']['delivery']['delivery_postal_code']['#validate'] = array('_uc_pagseguro_validate_postal_code' => array());
+      $form['panes']['delivery']['delivery_postal_code']['#maxlength'] = '8';
+      $form['panes']['delivery']['delivery_phone']['#description'] = t('Formato: (99) 1234-5678');
+      $form['panes']['delivery']['delivery_phone']['#validate'] = array('_uc_pagseguro_validate_phone' => array());
+      $form['panes']['delivery']['delivery_phone']['#maxlength'] = '14';
+    break;
+  }
+}
+
+/* *****************************
+ * Hook Functions (Ubercart)
+ * ***************************** */
+
+/**
+ * Implementation of hook_uc_message().
+ * Define default text for module's instrucions and messages
+ */
+function uc_pagseguro_uc_message() {
+  $messages['pagseguro_instructions'] = t('O PagSeguro &eacute; um m&eacute;todo de pagamentos fornecido pelo UOL, que permite o pagamento seguro ' .
+    'atrav&eacute;s de cart&atilde;o de cr&eacute;dito, transfer&ecirc;ncia e boleto banc&aacute;rio. ' .
+    '<strong>Nota: o pagamento parcelado em cart&atilde;o de cr&eacute;dito está sujeito a juros estipulados pelo PagSeguro.');
+  return $messages;
+}
+
+/**
+ * Implementation of hook_payment_method().
+ */
+function uc_pagseguro_payment_method() {
+  $path = base_path() . drupal_get_path('module', 'uc_pagseguro');
+  $title = variable_get('uc_pagseguro_method_title', t('PagSeguro'));
+
+  $methods[] = array(
+    'id' => 'pagseguro',
+    'name' => t('PagSeguro'),
+    'title' => $title,
+    'desc' => t('Pagamento por PagSeguro.'),
+    'callback' => 'uc_payment_method_pagseguro',
+    'weight' => 3,
+    'checkout' => TRUE,
+    'backend' => TRUE,
+    'no_gateway' => TRUE,
+  );
+
+  return $methods;
+}
+
+
+/* **************************************
+ * Callback Functions, Forms, and Tables
+ * **************************************
+ */
+
+/**
+ * Callback for pagseguro payment method settings.
+ */
+function uc_payment_method_pagseguro($op, &$arg1) {
+  switch ($op) {
+    case 'cart-details':
+      $details = variable_get('uc_pagseguro_instructions', uc_get_message('pagseguro_instructions'));
+      return $details;
+
+    case 'cart-process':
+      $_SESSION['pay_method'] = $_POST['pay_method'];
+      return;
+
+    case 'settings':
+      $form['uc_pagseguro_email_pagseguro'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Email cadastrado no PagSeguro'),
+        '#default_value' => variable_get('uc_pagseguro_email_pagseguro', ''),
+        '#size' => 50,
+        '#maxlength' => 50,
+        '#description' => t('Informe o e-mail que foi utilizado na sua conta do PagSeguro.'),
+        '#required' => TRUE,
+      );
+
+      $form['uc_pagseguro_token_pagseguro'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Token gerado pelo PagSeguro'),
+        '#default_value' => variable_get('uc_pagseguro_token_pagseguro', ''),
+        '#size' => 50,
+        '#maxlength' => 50,
+        '#description' => t('Informe o token gerado para sua conta no PagSeguro. ' .
+          '<strong>Caso utilize esta op&ccedil;&atilde;o, n&atilde;o esque&ccedil;a de configurar o PagSeguro para utilizar o Retorno Autom&aacute;tico de Dados.</strong>'),
+        '#required' => FALSE,
+      );
+
+      $form['uc_pagseguro_frete'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('C&aacute;lculo de frete pelo Ubercart'),
+        '#default_value' => variable_get('uc_pagseguro_frete', '1'),
+        '#description' => t('Marque para o c&aacute;lculo ser realizado no UberCart. Caso contr&aacute;rio, o c&aacute;lculo ser&aacute; feito pelo PagSeguro. ' .
+          '<strong>N&atilde;o esque&ccedil;a de configurar o PagSeguro de acordo com esta op&ccedil;&atilde;o.</strong>'),
+        '#required' => FALSE,
+      );
+
+      // @todo: verify if this is needed
+      $form['uc_pagseguro_checkout_button'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Checkout revision button text'), 
+        '#description' => t('Informe um texto especial para o bot&atilde;o de enviar na p&aacute;gina de revis&atilde;o do pedido.'),
+        '#default_value' => variable_get('uc_pagseguro_checkout_button', t('Pagar no PagSeguro')),
+      );
+
+      $form['uc_pagseguro_use_sandbox'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Usar endereço alternativo para testes'),
+        '#description' => t('Marque esta opção para utilizar um endereço alternativo durante os testes de sua instalação, ao invés do endereço oficial do PagSeguro. Veja em <a href="http://visie.com.br/pagseguro/ambientetestes.php">&quot;Ambiente de testes do PagSeguro&quot;</a> como criar seu próprio servidor de testes. Se esta opção estiver desmarcada, o pagamento utilizará o endereço oficial do PagSeguro <strong>https://pagseguro.uol.com.br</strong>.'),
+        '#default_value' => variable_get('uc_pagseguro_use_sandbox', FALSE)
+      );
+
+
+      $form['uc_pagseguro_sandbox_url'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Endereço alternativo para testes'),
+        '#description' => t('Informe o endereço de testes que deverá ser utilizado se a opção "Usar endereço alternativos para testes" acima estiver marcada. Informe apenas o protocolo e nome do <em>host</em>, sem barras no final. Por exemplo: <strong>http://pagseguro.exemplo.com.br<strong>'),
+        '#default_value' => variable_get('uc_pagseguro_sandbox_url', '')
+      );
+
+      return $form;
+  }
+}
+
+/**
+ * Form to build the submission to pagseguro.com.
+ * Note: Form hardcoded and embedded into an iframe, since we need to
+ *  use iso-8859-1 single byte encoding
+ */
+function uc_pagseguro_form_latin() {
+  
+  $order = uc_order_load(intval($_SESSION['cart_order']));
+  
+  $endereco = ($order->billing_street1) ? _uc_pagseguro_extract_address($order->billing_street1) : array();
+  
+  $telefone = ($order->billing_phone) ? _uc_pagseguro_extract_phone($order->billing_phone) : array();
+  
+  $complementoarray = _uc_pagseguro_extract_district($order->billing_street2);
+  $complemento1 = current($complementoarray);
+  $complemento2 = next($complementoarray);
+  
+  $frete = variable_get('uc_pagseguro_frete', '1');
+  
+  $country = uc_get_country_data(
+    array('country_id' => $order->billing_country)
+  );
+
+  if ($country === FALSE) {
+    $country = array(0 => array('country_iso_code_3' => 'USA'));
+  }
+
+  $data = array(
+    'email_cobranca' => variable_get('uc_pagseguro_email_pagseguro', ''),
+    'tipo' => 'CP',
+    'moeda' => 'BRL',
+    'cliente_nome' => _uc_pagseguro_latin1($order->billing_first_name) .' '.
+                      _uc_pagseguro_latin1($order->billing_last_name),
+    'cliente_end' => _uc_pagseguro_latin1(current($endereco)),
+    'cliente_num' => next($endereco),
+    'cliente_compl' => $complemento2 ? _uc_pagseguro_latin1($complemento1) : '',
+    'cliente_bairro' => ($complemento2) ? _uc_pagseguro_latin1($complemento2) : _uc_pagseguro_latin1($complemento1),
+    'cliente_ddd' => current($telefone),
+    'cliente_tel' => next($telefone),
+    'cliente_email' => substr($order->primary_email, 0, 200),
+    'cliente_cidade' => _uc_pagseguro_latin1(substr($order->billing_city, 0, 100)),
+    'cliente_uf' => uc_get_zone_code($order->billing_zone),
+    'cliente_cep' => substr($order->billing_postal_code, 0, 8),
+    'cliente_pais' => $country[0]['country_iso_code_3'],
+    'ref_transacao' => $order->order_id
+  );
+  
+  if ($frete) {
+    $data['tipo_frete'] = 'SD';
+  }
+
+  /* PagSeguro only accepts shipping per item
+     so we need to divide the total amount per number of items */
+  $shipping = 0;
+  foreach ($order->line_items as $item) {
+    if ($item['type'] == 'shipping') {
+      $shipping += $item['amount'];
+    }
+  }
+
+  $i = 0;
+  foreach ($order->products as $product) {
+    $i++;
+    
+    // Items with zero price won't be payed
+    if ($product->price==0) continue;
+    
+    /* Since PagSeguro doesn't accept same products in different lines as
+       übercart does, we have to vary the id with order_product_id */
+    $data['item_id_' . $i] = $product->nid . '-' . $product->order_product_id;
+    $data['item_descr_' . $i] = $product->qty."x "._uc_pagseguro_latin1($product->title);
+    $data['item_quant_' . $i] = 1;
+    $data['item_valor_' . $i] = $product->qty * $product->price * 100;
+    
+    if ($frete) {
+      $data['item_peso_' . $i] = $product->weight * 100;
+    }
+  }
+
+  $data['item_frete_' . $i] = $shipping * 100;
+
+
+  $html = '<form target="_top" method="post" action="'.
+    _uc_pagseguro_url()
+    .'/security/webpagamentos/webpagto.aspx"'
+    .' content-type="application/x-www-form-urlencoded; charset=iso-8859-1"'
+    .' accept-charset="iso-8859-1">';
+  
+  foreach ($data as $name => $value) {
+    $html.="\n<input type='hidden' name='$name' value='$value' />";
+  }
+  
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => variable_get('uc_pagseguro_checkout_button', t('Submit Order')),
+  );
+  
+  $html .= drupal_render($form['submit']);
+  
+  $html .= '</form>';
+
+  //Saving Order_ID for use after validating
+  $_SESSION['PagSeguro_OrderID'] = $order->order_id;
+  $_SESSION['pagseguro_form'] = $html;
+
+  return $html;
+}
+
+/**
+ * Page Callback: Show Form
+ */
+function uc_pagseguro_form() {
+  header("Content-Type: text/html; charset=iso-8859-1");
+  // @todo: add html doctype and stuff
+  print theme(
+    'uc_pagseguro_form_latin1',
+    t('Pay via PagSeguro'),
+    uc_pagseguro_form_latin()
+  );
+  exit();
+}
+
+
+
+/* ****************************************
+ * Support Functions (Ubercart / PagSeguro)
+ * ****************************************
+ */
+
+/**
+ * Return URL for pagseguro or sandbox if configured
+ * @todo : validate on form submission
+ * @todo : clarify this proccess
+ */
+function _uc_pagseguro_url() {
+  if (variable_get('uc_pagseguro_use_sandbox', FALSE)) {
+    $url = variable_get('uc_pagseguro_sandbox_url', '');
+    if (!$url) {
+      drupal_set_message(
+        t('Sandbox enabled, but URL not provided.'),
+        'error'
+      );
+      watchdog('uc_pagseguro',
+        t('Sandbox enabled, but URL not provided'),
+        NULL,
+        WATCHDOG_ERROR
+      );
+    }
+  }
+  else {
+    $url = 'https://pagseguro.uol.com.br';
+  }
+  return $url;
+}
+
+/**
+ * Transcode UTF-8 to ISO-8559-1
+ *
+ * @param
+ *   String to transcode
+ */
+function _uc_pagseguro_latin1($string) {
+  return utf8_decode($string);
+}
+
+
+/**
+ * Complete the payment process and return user to front page
+ * @todo: use ubercart settings when redirecting
+ * @todo: improve this code for better support to cron
+ */
+function uc_pagseguro_complete() {
+  header('Content-Type: text/plain');
+  
+  // PagSeguro calls this function twice; First for bring $_POST and verify Token;
+  if ( $_SERVER['REQUEST_METHOD'] != 'POST' ) {
+    $order = uc_order_load($_SESSION['PagSeguro_OrderID']);
+    unset($_SESSION['PagSeguro_OrderID']);
+
+    if (uc_order_status_data($order->order_status, 'state') == 'in_checkout') {
+      drupal_set_message(t('Your order is being processed by PagSeguro. If you have chosen the option Boleto, your order will be completed only after the payment being confirmed (usually 3 business days).')); 
+    }
+    else {
+      drupal_set_message(t('Transaction confirmed by PagSeguro'), 'admin'); //Transa&ccedil;&atilde;o confirmada com o PagSeguro.
+      if (uc_order_status_data($order->order_status, 'state') == 'pending') {
+        drupal_set_message(t('Waiting payment confirmation from PagSeguro'),'admin');
+      }
+    }
+    $cart_id = uc_cart_get_id();
+    uc_cart_empty($cart_id);
+    drupal_goto('<front>');
+  }
+
+  // Antes de fazer qualquer coisa, verifica a confirmacao junto ao PagSeguro
+  $token = variable_get('uc_pagseguro_token_pagseguro', '');
+  if (!$token) {
+    watchdog(
+      'uc_pagseguro',
+      'A verificacao da confirmação do PagSeguro não pôde ser feita '.
+      'porque o token de segurança não está configurado',
+      NULL,
+      WATCHDOG_NOTICE
+    );
+    exit();
+  }
+
+ //if $token is not empty, let's confirm transaction with PagSeguro
+  $retorno = _uc_pagseguro_verify($token);
+
+  if ($retorno == 'OK' || $retorno == 'FALSO') {
+    $order = uc_order_load($_POST['Referencia']);
+    if (!$order) {
+      watchdog('uc_pagseguro',
+        'Nao foi possivel carregar pedido a partir de "@ref"',
+        array('@ref' => $_POST['Referencia']),
+        WATCHDOG_NOTICE
+      );
+      exit();
+    }
+  }
+
+  switch ($retorno) {
+  case 'OK':
+    uc_order_comment_save(
+      $order->order_id,
+      0,
+      t('Transa&ccedil;&atilde;o confirmada com o PagSeguro'),
+      'admin'
+    );
+  break;
+  case 'CONNECTFAIL':
+    uc_order_comment_save(
+      $order->order_id,
+      0,
+      t('Transa&ccedil;&atilde;o n&atilde;o foi confirmada com o '.
+        'PagSeguro: Problemas de conex&atilde;o.'),
+      'admin'
+    );
+  break;
+  case 'FALSO':
+  default:
+    watchdog(
+      'uc_pagseguro',
+      'Transação "@trans" não confirmada pelo PagSeguro',
+      array('@trans' => $_POST['Referencia']),
+      WATCHDOG_NOTICE
+    );
+    exit();
+  }
+
+  $order = uc_order_load($_POST['Referencia']);
+
+  if ( uc_order_status_data($order->order_status, 'state') != 'in_checkout') {
+    uc_order_comment_save(
+      $order->order_id,
+      0,
+      t('Recebida confirmação do PagSeguro para pedido que '.
+        'não está com status de checkout.'),
+      'admin'
+    );
+    //exit();
+  }
+
+  $order->first_name = _uc_pagseguro_strstr($_POST['CliNome'], ' ', TRUE);
+  $order->last_name = _uc_pagseguro_strstr($_POST['CliNome'], ' ');
+  $order->billing_street1 = $_POST['CliEndereco'] .', '.
+    $_POST['CliNumero'] .' - '. $_POST['CliBairro'];
+    
+  $order->billing_street2 = $_POST['CliComplemento'];
+  $order->city = $_POST['CliCidade'];
+  $order->billing_postal_code = substr(
+    $_POST['CliCEP'], 0, 5) . '-' . substr($_POST['CliCEP'], -3
+  );
+  $order->billing_phone = '(' . substr($_POST['CliTelefone'], 0, 2) . ') ' .
+    substr($_POST['CliTelefone'], -8);
+  $order->billing_zone = $_POST['CliEstado'];
+
+  $country_id = db_result(db_query(
+    "SELECT country_id FROM {uc_countries} WHERE country_name LIKE '%s'",
+    $_POST['CliPais']
+  ));
+  
+  if (!empty($country_id)) {
+    $order->billing_country = $country_id;
+  }
+
+  if (strtolower($_POST['CliEmail']) !== strtolower($order->primary_email)) {
+    uc_order_comment_save(
+      $order->order_id,
+      0,
+      t('Obs.: cliente usou um e-mail diferente durante pagamento no PagSeguro: @email',
+        array('@email' => $_POST['CliEmail'])
+      ),
+      'admin'
+    );
+  }
+
+  $total = 0;
+  $i = 1;
+  while ( isset($_POST['ProdId_' . $i]) ) {
+    $total += (_uc_pagseguro_parseval($_POST['ProdValor_' . $i])
+            + _uc_pagseguro_parseval($_POST['ProdFrete_' . $i])
+            + _uc_pagseguro_parseval($_POST['ProdExtras_' . $i]))
+            * intval($_POST['ProdQuantidade_' . $i]);
+    $i++;
+  };
+
+  uc_order_comment_save(
+    $order->order_id, 0, t(
+      'Recebido status "@status" ("@type") do PagSeguro',
+      array(
+        '@type' => $_POST['TipoPagamento'],
+        '@status' => $_POST['StatusTransacao']
+      )
+    ),
+    'admin'
+  );
+
+  switch (strtolower(utf8_encode($_POST['StatusTransacao']))) {
+    case 'completo':
+      $comment = t(
+        'Pagamento confirmado pelo PagSeguro ("@type"), transaçãoID PagSeguro #@order, total pago R$ !total.',
+        array(
+          '@type' => $_POST['TipoPagamento'],
+          '@order' => $_POST['TransacaoID'],
+          '!total' => number_format($total, 2, ",", ".")
+        )
+      );
+      uc_payment_enter($order->order_id, 'pagseguro', $total, 0, NULL, $comment);
+      uc_cart_complete_sale($order);
+      $order->order_status = 'completed';
+      break;
+
+    case 'aguardando pagto':
+      uc_order_update_status($order->order_id, 'pending');
+      $order->order_status = 'pending';
+      break;
+      
+    case 'aprovado':
+      uc_order_update_status($order->order_id, 'payment_received');
+      $order->order_status = 'payment_received';
+      break;
+      
+    case 'em análise':
+      uc_order_update_status($order->order_id, 'processing');
+      $order->order_status = 'processing';
+      break;
+       
+    case 'cancelado':
+      uc_order_update_status($order->order_id, 'canceled');
+      $order->order_status = 'canceled';
+      break;
+  }
+
+  uc_order_save($order);
+  exit();
+}
+
+/**
+ * Transliterate String.
+ *
+ * @param $string
+ *   String to transliterate
+ *
+ * @todo remove, it's deprecated
+ */
+function _uc_pagseguro_ascii($string) {
+  static $translations = array();
+  
+  // Try to use transliteration_get
+  if (function_exists('transliteration_get')) {
+    return transliteration_get($string);
+  }
+  
+  // Fallback: use pathauto i18n-ascii transliteration table
+  if (empty($translations)) {
+    $translations = parse_ini_file(drupal_get_path('module', 'uc_pagseguro') .'/i18n-ascii.txt');
+  }
+  
+  return strtr($string, $translations);
+}
+
+/**
+ * Implement $before_needle version if PHP version is under 5.3
+ * 
+ * @param $haystack
+ *   The input string.
+ * @param $needle
+ *   If needle is not a string, it is converted to an integer and applied as the ordinal value of a character.
+ *
+ */
+function _uc_pagseguro_strstr($haystack, $needle, $before_needle=FALSE) {
+  
+  // Reduce overhead if native PHP implementation is available
+  if (version_compare(PHP_VERSION, '5.3.0') >= 0) {
+    return strstr($haystack, $needle, $before_needle);
+  }
+  
+  //Find position of $needle or abort
+  if (($pos=strpos($haystack, $needle))===FALSE) {
+    return FALSE;
+  }
+  if ($before_needle) {
+    return drupal_substr($haystack, 0, $pos);
+  }
+  else {
+    return drupal_substr($haystack, $pos+drupal_strlen($needle));
+  }
+}
+
+/**
+ * Validates an address before send it to pagseguro
+ *
+ * @param &$element
+ *   Form element to validate
+ */
+function _uc_pagseguro_validate_address(&$element) {
+  if ($element['#value'] != '') {
+    if (!_uc_pagseguro_extract_address($element['#value'])) {
+      form_error($element, t('Invalid Address format. Please check the highlighted field.')); // Endere&ccedil;o em formato n&atilde;o validado. Por favor, verifique o campo marcado.
+    }
+  }
+}
+
+/**
+ * Parse address inserted by user
+ *
+ * @param $address
+ *   Address string
+ */
+function _uc_pagseguro_extract_address($address) {
+  //  Let's assume that the last part of the address is always the number, in brazilian format
+  //  Testing for: Rua X, 999 OR Rua X,999
+  $numero = trim(end(explode(',',$address)));
+  if (is_numeric ($numero) || (strtolower($numero) == 's/n')) {
+    return array(trim(_uc_pagseguro_strstr($address, ',', TRUE)), $numero);
+  }
+  else {
+    // TO DO: Study a way to accept address without comma
+    // @TODO: Validate Comma in address
+    return array();
+  }
+}
+
+/**
+ * Validates a district before sending to pagseguro
+ *
+ * @param &$element
+ *   Form element to validate
+ */
+function _uc_pagseguro_validate_district(&$element) {
+  if ($element['#value'] != '') {
+    if (!_uc_pagseguro_extract_district($element['#value'])) {
+      form_error(
+        $element,
+        t('Complemento e Bairro em formato n&atilde;o validado. Por favor, verifique o campo marcado.')
+      );
+    }
+  }
+}
+
+/**
+ * Parses District from Address
+ *
+ * @param $street2
+ *   Line 2 from street address
+ */
+function _uc_pagseguro_extract_district($street2) {
+  //  Let's assume that the last part of the address is always the number, in brazilian format
+  //  Testing for: Rua X, 999 OR Rua X,999
+  $bairro = trim(_uc_pagseguro_strstr($street2, ','));
+  if (! $bairro) {
+    return array(trim($street2));
+  }
+  else {
+    return array(trim(_uc_pagseguro_strstr($street2, ',', TRUE)), $bairro);
+  }
+}
+
+/**
+ * Validates Postal Codes
+ *
+ * @param &$element
+ *   Form element to validate
+ */
+function _uc_pagseguro_validate_postal_code(&$element) {
+  if ($element['#value'] != '') {
+    if (! is_numeric (trim ($element['#value']))) {
+      form_error(
+        $element,
+        t('CEP em formato n&atilde;o validado. Por favor, verifique o campo marcado.')
+      );
+    }
+  }
+}
+
+/**
+ * Validates Phone Number
+ *
+ * @param &$element
+ *   Form element to validate
+ */
+function _uc_pagseguro_validate_phone(&$element) {
+  if ($element['#value'] != '') {
+    if (!_uc_pagseguro_extract_phone($element['#value'])) {
+      form_error(
+        $element,
+        t('Telefone em formato n&atilde;o validado. Por favor, verifique o campo marcado.')
+      );
+    }
+  }
+}
+
+/**
+ * Parses phone number for formatting
+ *
+ * @param $phone
+ *   Phone number
+ *
+ * @todo: improve number parsing using preg REGEX
+ */
+function _uc_pagseguro_extract_phone($phone) {
+  // Let's assume brazilian format also for telephone number
+  // Testing for: (99) 1234-5678 OR (99)12345678
+  // Testing first coding area
+  $stripddd = _uc_pagseguro_strstr($phone, ')', TRUE);
+  if ($stripddd !== FALSE) {
+    $ddd = substr($stripddd, 1, 2);
+    if (! is_numeric ($ddd)) {
+      return FALSE;
+    }
+    //  Now testing telephone number
+    elseif (! is_numeric ($numero = (trim ( str_replace ('-', '', _uc_pagseguro_strstr($phone, ')')))))) {
+      return FALSE;
+    }
+    else {
+      return array($ddd, $numero);
+    }
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Verify the NPI Return URL
+ *
+ * @param $token
+ *   Token configured for PagSeguro
+ *
+ * @todo: Check NPI with cron too, sending email notification
+ */
+function _uc_pagseguro_verify($token) {
+  // Receives the data sent by PagSeguro and save the data for further validation
+  $PagSeguro = 'Comando=validar';
+  $PagSeguro .= '&Token=' . $token;
+  $Cabecalho = '';
+  $confirma = '';
+
+  foreach ($_POST as $key => $value) {
+    $value = urlencode(stripslashes($value));
+    $PagSeguro .= "&$key=$value";
+  }
+
+  // @todo : prefer cURL lib
+  $r = drupal_http_request(
+    _uc_pagseguro_url() . '/Security/NPI/Default.aspx',
+    array('Content-Type' => 'application/x-www-form-urlencoded'), 'POST', $PagSeguro
+  );
+  if ( $r->code != 200 ) {
+    return 'CONNECTFAIL';
+  }
+
+  $resp = $r->data;
+
+  switch ($resp) {
+    case 'VERIFICADO':
+      $confirma = 'OK';
+      break;
+    case 'FALSO':
+      $confirma = 'FALSO';
+      break;
+    default:
+      $confirma = 'CONNECTFAIL';
+      break;
+  }
+
+  return $confirma;
+}
+
+/**
+ * @todo: use ubercart function?
+ * Formats a number with commas for decimal places
+ */
+function _uc_pagseguro_parseval($s) {
+  // Retorna valor decimal de string com "," no lugar do ponto
+  // decimal (como os retornados pelo PagSeguro
+  return strtr($s, ',', '.') + 0;
+}
